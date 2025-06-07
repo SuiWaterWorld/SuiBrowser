@@ -1,0 +1,197 @@
+module suibrowser::suibrowser {
+    use sui::object::{Self, UID};
+    use sui::transfer;
+    use sui::tx_context::{Self, TxContext};
+    use sui::table::{Self, Table};
+    use sui::event;
+    use std::string::{Self, String};
+    use sui::coin::{Self, Coin};
+    use sui::sui::SUI;
+    use sui::dynamic_field as df;
+
+    // Struct for content entry (e.g., webpage or dApp hosted on IPFS)
+    struct Content has key, store {
+        id: UID,
+        cid: String, // IPFS CID (e.g., "Qm...")
+        title: String,
+        description: String,
+        owner: address,
+        binary_hash: String, // Hash for binary transparency
+    }
+
+    // Struct for user identity (zkLogin-based)
+    struct UserIdentity has key, store {
+        id: UID,
+        user_address: address,
+        zk_proof: String, // Placeholder for zkLogin proof
+        platform_id: String, // Cross-platform ID (e.g., Google, Facebook)
+    }
+
+    // Struct for file sharing metadata (integrates with Walrus)
+    struct FileShare has key, store {
+        id: UID,
+        cid: String, // IPFS CID of the file
+        owner: address,
+        recipient: address,
+        encrypted: bool, // Indicates Seal encryption
+    }
+
+    // Registry to manage content, identities, and files
+    struct SuiBrowserRegistry has key {
+        id: UID,
+        contents: Table<String, Content>, // CID -> Content
+        identities: Table<address, UserIdentity>, // Address -> Identity
+        files: Table<String, FileShare>, // File CID -> FileShare
+        admin: address,
+    }
+
+    // Event for content addition
+    struct ContentAdded has copy, drop {
+        cid: String,
+        title: String,
+        owner: address,
+    }
+
+    // Event for file sharing
+    struct FileShared has copy, drop {
+        cid: String,
+        owner: address,
+        recipient: address,
+    }
+
+    // Initialize the registry (called by deployer)
+    fun init(ctx: &mut TxContext) {
+        let registry = SuiBrowserRegistry {
+            id: object::new(ctx),
+            contents: table::new(ctx),
+            identities: table::new(ctx),
+            files: table::new(ctx),
+            admin: tx_context::sender(ctx),
+        };
+        transfer::share_object(registry);
+    }
+
+    // Register a new user identity with zkLogin
+    public entry fun register_identity(
+        registry: &mut SuiBrowserRegistry,
+        zk_proof: String,
+        platform_id: String,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        assert!(!table::contains(&registry.identities, sender), 0); // No duplicate identities
+
+        let identity = UserIdentity {
+            id: object::new(ctx),
+            user_address: sender,
+            zk_proof, // Validate off-chain in production
+            platform_id,
+        };
+
+        table::add(&mut registry.identities, sender, identity);
+    }
+
+    // Add content to the registry (supports binary transparency)
+    public entry fun add_content(
+        registry: &mut SuiBrowserRegistry,
+        cid: String,
+        title: String,
+        description: String,
+        binary_hash: String, // Hash for binary transparency
+        payment: Coin<SUI>, // Optional payment for sponsored tx
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        // Verify zkLogin identity exists
+        assert!(table::contains(&registry.identities, sender), 1);
+
+        // Handle sponsored transaction (if payment provided)
+        if (coin::value(&payment) > 0) {
+            transfer::public_transfer(payment, registry.admin);
+        } else {
+            // Ensure sender pays gas in non-sponsored case
+            assert!(coin::value(&payment) == 0, 2);
+        };
+
+        let content = Content {
+            id: object::new(ctx),
+            cid,
+            title,
+            description,
+            owner: sender,
+            binary_hash,
+        };
+
+        table::add(&mut registry.contents, cid, content);
+
+        event::emit(ContentAdded {
+            cid,
+            title,
+            owner: sender,
+        });
+    }
+
+    // Share a file (integrates with Walrus, supports Seal encryption)
+    public entry fun share_file(
+        registry: &mut SuiBrowserRegistry,
+        cid: String,
+        recipient: address,
+        encrypted: bool,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        assert!(table::contains(&registry.identities, sender), 1); // Verify identity
+
+        let file = FileShare {
+            id: object::new(ctx),
+            cid,
+            owner: sender,
+            recipient,
+            encrypted,
+        };
+
+        table::add(&mut registry.files, cid, file);
+
+        event::emit(FileShared {
+            cid,
+            owner: sender,
+            recipient,
+        });
+    }
+
+    // Query content metadata by CID
+    public fun get_content(registry: &SuiBrowserRegistry, cid: String): (String, String, address, String) {
+        assert!(table::contains(&registry.contents, cid), 3);
+        let content = table::borrow(&registry.contents, cid);
+        (content.cid, content.title, content.owner, content.binary_hash)
+    }
+
+    // Query user identity
+    public fun get_identity(registry: &SuiBrowserRegistry, user: address): (String, String) {
+        assert!(table::contains(&registry.identities, user), 4);
+        let identity = table::borrow(&registry.identities, user);
+        (identity.zk_proof, identity.platform_id)
+    }
+
+    // Verify binary transparency (compare provided hash with stored hash)
+    public fun verify_binary(registry: &SuiBrowserRegistry, cid: String, provided_hash: String): bool {
+        assert!(table::contains(&registry.contents, cid), 3);
+        let content = table::borrow(&registry.contents, cid);
+        content.binary_hash == provided_hash
+    }
+
+    // Delete content (restricted to owner or admin)
+    public entry fun delete_content(
+        registry: &mut SuiBrowserRegistry,
+        cid: String,
+        ctx: &mut TxContext
+    ) {
+        let sender = tx_context::sender(ctx);
+        assert!(table::contains(&registry.contents, cid), 3);
+        let content = table::borrow(&registry.contents, cid);
+        assert!(content.owner == sender || registry.admin == sender, 5);
+
+        let Content { id, cid: _, title: _, description: _, owner: _, binary_hash: _ } = table::remove(&mut registry.contents, cid);
+        object::delete(id);
+    }
+}
