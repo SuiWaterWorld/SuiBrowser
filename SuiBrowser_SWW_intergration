@@ -1,0 +1,131 @@
+module suibrowser_dapp::suibrowser {
+    use sui::coin::{Self, Coin, TreasuryCap};
+    use sui::object::{Self, UID};
+    use sui::tx_context::{Self, TxContext};
+    use sui::transfer;
+    use sui::event;
+    use sui::url::{Self, Url};
+    use sui::balance::{Self, Balance};
+
+    // Constants
+    const E_NOT_AUTHORIZED: u64 = 0;
+    const E_INSUFFICIENT_BALANCE: u64 = 1;
+    const E_INVALID_SUBSCRIPTION: u64 = 2;
+    const PRO_SUBSCRIPTION_FEE: u64 = 100; // 100 SWW tokens for Pro subscription
+
+    // SWW Token
+    struct SWW has drop {}
+
+    // Pro Subscription Object
+    struct ProSubscription has key, store {
+        id: UID,
+        user: address,
+        active: bool,
+        expiry: u64, // Timestamp for subscription expiry
+    }
+
+    // Admin Capability
+    struct AdminCap has key { id: UID }
+
+    // Browser State
+    struct BrowserState has key {
+        id: UID,
+        treasury_cap: TreasuryCap<SWW>,
+        payment_pool: Balance<SWW>,
+    }
+
+    // Event for Pro Subscription Activation
+    struct SubscriptionActivated has copy, drop {
+        user: address,
+        expiry: u64,
+    }
+
+    // Initialize the dApp and SWW token
+    fun init(witness: SWW, ctx: &mut TxContext) {
+        let (treasury_cap, metadata) = coin::create_currency(
+            witness,
+            9, // Decimals
+            b"SWW",
+            b"SuiWaterWorld Token",
+            b"Token for SuiBrowser Pro payments",
+            option::some(url::new_unsafe_from_bytes(b"https://suiwaterworld.xyz/sww.png")),
+            ctx
+        );
+        
+        // Transfer metadata to be shared
+        transfer::public_share_object(metadata);
+        
+        // Create Admin Capability
+        let admin_cap = AdminCap { id: object::new(ctx) };
+        transfer::transfer(admin_cap, tx_context::sender(ctx));
+
+        // Initialize Browser State
+        let browser_state = BrowserState {
+            id: object::new(ctx),
+            treasury_cap,
+            payment_pool: balance::zero(),
+        };
+        transfer::share_object(browser_state);
+    }
+
+    // Activate Pro Subscription
+    public entry fun activate_pro(
+        browser_state: &mut BrowserState,
+        payment: Coin<SWW>,
+        expiry_duration: u64,
+        ctx: &mut TxContext
+    ) {
+        let user = tx_context::sender(ctx);
+        let payment_value = coin::value(&payment);
+
+        // Check if payment is sufficient
+        assert!(payment_value >= PRO_SUBSCRIPTION_FEE, E_INSUFFICIENT_BALANCE);
+
+        // Add payment to pool
+        let payment_balance = coin::into_balance(payment);
+        balance::join(&mut browser_state.payment_pool, payment_balance);
+
+        // Create or update subscription
+        let subscription = ProSubscription {
+            id: object::new(ctx),
+            user,
+            active: true,
+            expiry: tx_context::epoch(ctx) + expiry_duration,
+        };
+        transfer::transfer(subscription, user);
+
+        // Emit event
+        event::emit(SubscriptionActivated {
+            user,
+            expiry: subscription.expiry,
+        });
+    }
+
+    // Check if user has active Pro subscription
+    public fun is_pro_active(subscription: &ProSubscription, ctx: &TxContext): bool {
+        subscription.active && subscription.expiry > tx_context::epoch(ctx)
+    }
+
+    // Admin function to mint new SWW tokens
+    public entry fun mint_sww(
+        _: &AdminCap,
+        browser_state: &mut BrowserState,
+        amount: u64,
+        recipient: address,
+        ctx: &mut TxContext
+    ) {
+        let new_coins = coin::mint(&mut browser_state.treasury_cap, amount, ctx);
+        transfer::public_transfer(new_coins, recipient);
+    }
+
+    // Admin function to withdraw payments from pool
+    public entry fun withdraw_payments(
+        _: &AdminCap,
+        browser_state: &mut BrowserState,
+        amount: u64,
+        recipient: address,
+        ctx: &mut TxContext
+    ) {
+        let withdrawn_balance = balance::split(&mut browser_state.payment_pool, amount);
+        let withdrawn_coin = coin::from_balance(withdrawn_balance, ctx);
+        transfer::public_transfer(withdrawn_coin
