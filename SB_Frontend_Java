@@ -1,0 +1,49 @@
+// Example integration code for SuiBrowser with $SWW payments
+async function initializeSuiBrowser() {
+    try {
+        const suiBrowser = await window.suiBrowser.initialize();
+        console.log('Sui Browser initialized:', suiBrowser);
+
+        // Connect to wallet
+        suiBrowser.on('connection', (event) => {
+            console.log('Sui Browser connected:', event);
+        });
+
+        // Function to activate Pro subscription
+        async function activateProSubscription() {
+            try {
+                const provider = suiBrowser.getProvider();
+                const signer = provider.getSigner();
+                
+                // Prepare transaction for Pro subscription
+                const tx = {
+                    kind: 'moveCall',
+                    data: {
+                        packageObjectId: '<PACKAGE_OBJECT_ID>',
+                        module: 'suibrowser',
+                        function: 'activate_pro',
+                        typeArguments: [],
+                        arguments: [
+                            '<BROWSER_STATE_OBJECT_ID>',
+                            '<SWW_COIN_OBJECT_ID>',
+                            '30', // Expiry duration in epochs (e.g., 30 days)
+                        ],
+                    },
+                };
+
+                const result = await signer.executeMoveCall(tx);
+                console.log('Pro subscription activated:', result);
+            } catch (error) {
+                console.error('Error activating Pro subscription:', error);
+            }
+        }
+
+        // Call to activate Pro subscription
+        document.getElementById('activate-pro-btn').addEventListener('click', activateProSubscription);
+    } catch (error) {
+        console.error('Error initializing Sui Browser:', error);
+    }
+}
+
+// Call the initialization function
+initializeSuiBrowser();
